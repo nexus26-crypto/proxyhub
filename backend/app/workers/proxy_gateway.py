@@ -29,7 +29,7 @@ from app.models.enums import LogLevel, ProxyStatus
 from app.models.log import Log
 from app.models.proxy import Proxy, ProxyCheckHistory
 from app.repositories.proxy_repository import ProxyRepository
-from app.services.proxy_service import compute_score
+from app.services.proxy_service import compute_score, derive_status_from_recent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("proxyhub.gateway")
@@ -86,12 +86,9 @@ async def record_proxy_outcome(proxy_id, success: bool, reason: str | None = Non
 
             proxy.score = compute_score(proxy.success_count, proxy.fail_count, proxy.latency_ms)
 
-            # nao rebaixa para blocked aqui (isso e papel do healthcheck oficial,
-            # que faz teste real); so ajusta o score para reduzir peso na rotacao
-            if not success and proxy.fail_count >= 5 and proxy.success_count == 0:
-                proxy.status = ProxyStatus.BLOCKED.value
-            elif success and proxy.status != ProxyStatus.ACTIVE.value:
-                proxy.status = ProxyStatus.ACTIVE.value
+            repo = ProxyRepository(session)
+            recent = await repo.get_recent_outcomes(proxy.id, limit=4)  # anteriores a este resultado
+            proxy.status = derive_status_from_recent([success, *recent])
 
             session.add(ProxyCheckHistory(
                 proxy_id=proxy.id, success=success, latency_ms=proxy.latency_ms,
@@ -377,6 +374,24 @@ def _parse_target_from_request(request_line: str, headers: dict[str, str]) -> tu
     return host, port, origin_form_line
 
 
+async def strip_client_proxy_headers(raw_head: bytes) -> bytes:
+    """
+    Remove headers destinados APENAS a autenticar no nosso Gateway
+    (Proxy-Authorization do cliente, Proxy-Connection) antes de repassar a
+    requisicao para o proxy upstream real. Sem isso, o proxy upstream recebe
+    a credencial do CLIENTE (que autentica no Gateway, nao nele) junto com a
+    nossa propria credencial injetada, e pode rejeitar com o 407 dele mesmo.
+    """
+    head, _, rest = raw_head.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    filtered = [
+        line for line in lines
+        if not line.lower().startswith(b"proxy-authorization:")
+        and not line.lower().startswith(b"proxy-connection:")
+    ]
+    return b"\r\n".join(filtered) + b"\r\n\r\n" + rest
+
+
 async def handle_plain_http(client_reader, client_writer, request_line, headers, raw_head) -> None:
     """
     Encaminha requisicao HTTP simples atraves do proxy upstream (HTTP ou SOCKS5),
@@ -391,6 +406,7 @@ async def handle_plain_http(client_reader, client_writer, request_line, headers,
         client_writer.close()
         return
     target_host, target_port, origin_form_line = target
+    raw_head = await strip_client_proxy_headers(raw_head)
 
     tried_ids: set = set()
 
