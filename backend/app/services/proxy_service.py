@@ -28,6 +28,33 @@ def compute_score(success: int, fail: int, latency_ms: float | None) -> float:
     return round(score, 2)
 
 
+def derive_status_from_recent(recent_outcomes: list[bool]) -> str:
+    """
+    Decide o status do proxy com base numa JANELA das ultimas checagens
+    (mistura testes automaticos do scheduler + uso real via Gateway), em vez
+    de uma unica checagem isolada. Isso evita que uma falha pontual (blip de
+    rede, timeout passageiro) derrube o status imediatamente -- mais realista
+    e condizente com o uso real do proxy.
+
+    Regra: maioria das ultimas checagens define o status.
+      - >=50% de sucesso na janela -> active
+      - <50% de sucesso, mas com poucas amostras -> inactive (ainda incerto)
+      - 0% de sucesso com pelo menos 5 amostras -> blocked (persistentemente ruim)
+    """
+    if not recent_outcomes:
+        return ProxyStatus.TESTING.value
+
+    total = len(recent_outcomes)
+    successes = sum(1 for r in recent_outcomes if r)
+    success_rate = successes / total
+
+    if success_rate >= 0.5:
+        return ProxyStatus.ACTIVE.value
+    if successes == 0 and total >= 5:
+        return ProxyStatus.BLOCKED.value
+    return ProxyStatus.INACTIVE.value
+
+
 class ProxyService:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -73,7 +100,9 @@ class ProxyService:
         proxy.latency_ms = latency_ms
         proxy.last_check = datetime.now(timezone.utc)
         proxy.score = compute_score(proxy.success_count, proxy.fail_count, latency_ms)
-        proxy.status = self._derive_status(proxy, success)
+
+        recent = await self.repo.get_recent_outcomes(proxy.id, limit=4)  # anteriores a este teste
+        proxy.status = derive_status_from_recent([success, *recent])
 
         self.session.add(ProxyCheckHistory(
             proxy_id=proxy.id, success=success, latency_ms=latency_ms, message=message,
@@ -85,12 +114,6 @@ class ProxyService:
             id=proxy.id, success=success, latency_ms=latency_ms, message=message,
             status=proxy.status, score=proxy.score,
         )
-
-    @staticmethod
-    def _derive_status(proxy: Proxy, last_success: bool) -> str:
-        if not last_success and proxy.fail_count >= 5 and proxy.success_count == 0:
-            return ProxyStatus.BLOCKED.value
-        return ProxyStatus.ACTIVE.value if last_success else ProxyStatus.INACTIVE.value
 
     @staticmethod
     async def _check_connectivity(proxy: Proxy) -> tuple[bool, float | None, str | None]:
