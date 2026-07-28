@@ -4,6 +4,8 @@ import { Plus, Upload, Zap, Trash2 } from 'lucide-react'
 import { proxyService } from '../services/domain'
 import { StatusBadge } from '../components/Common'
 
+const PROXY_TYPES = ['http', 'https', 'socks4', 'socks5']
+
 export default function ProxiesPage() {
   const queryClient = useQueryClient()
   const fileRef = useRef(null)
@@ -64,11 +66,21 @@ export default function ProxiesPage() {
       </div>
 
       {showForm && (
-        <form onSubmit={handleCreate} className="card grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
+        <form onSubmit={handleCreate} className="card grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
           <Field label="Host" value={form.host} onChange={(v) => setForm({ ...form, host: v })} required />
           <Field label="Porta" value={form.port} onChange={(v) => setForm({ ...form, port: v })} type="number" required />
           <Field label="Usuário" value={form.username} onChange={(v) => setForm({ ...form, username: v })} />
           <Field label="Senha" value={form.password} onChange={(v) => setForm({ ...form, password: v })} type="password" />
+          <div>
+            <label className="text-xs text-slate-400">Tipo</label>
+            <select
+              value={form.type}
+              onChange={(e) => setForm({ ...form, type: e.target.value })}
+              className="w-full mt-1 bg-bg border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-accent uppercase"
+            >
+              {PROXY_TYPES.map((t) => <option key={t} value={t}>{t.toUpperCase()}</option>)}
+            </select>
+          </div>
           <button type="submit" className="bg-accent text-white text-sm rounded-lg py-2">Salvar</button>
         </form>
       )}

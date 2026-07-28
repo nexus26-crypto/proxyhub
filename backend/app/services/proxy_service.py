@@ -119,18 +119,35 @@ class ProxyService:
 
         for idx, line in enumerate(lines, start=1):
             try:
+                proxy_type = ProxyType.HTTP.value
+
                 if fmt == "csv":
                     reader = csv.reader(io.StringIO(line))
                     row = next(reader)
                     host, port = row[0], int(row[1])
                     username = row[2] if len(row) > 2 else None
                     password = row[3] if len(row) > 3 else None
+                    if len(row) > 4 and row[4].lower() in ("http", "https", "socks4", "socks5"):
+                        proxy_type = row[4].lower()
                 else:
-                    # formats: host:port or host:port:user:pass
-                    parts = line.split(":")
+                    # formatos aceitos:
+                    #   host:port
+                    #   host:port:user:pass
+                    #   host:port:user:pass:tipo   (tipo = http|https|socks4|socks5)
+                    #   socks5://host:port:user:pass  (prefixo de protocolo tambem aceito)
+                    working_line = line
+                    if "://" in working_line:
+                        scheme, working_line = working_line.split("://", 1)
+                        scheme = scheme.lower()
+                        if scheme in ("http", "https", "socks4", "socks5"):
+                            proxy_type = scheme
+
+                    parts = working_line.split(":")
                     host, port = parts[0], int(parts[1])
                     username = parts[2] if len(parts) > 2 else None
                     password = parts[3] if len(parts) > 3 else None
+                    if len(parts) > 4 and parts[4].lower() in ("http", "https", "socks4", "socks5"):
+                        proxy_type = parts[4].lower()
 
                 if await self.repo.get_by_host_port(host, port):
                     skipped += 1
@@ -138,7 +155,7 @@ class ProxyService:
 
                 proxy = Proxy(
                     host=host, port=port, username=username, password=password,
-                    type=ProxyType.HTTP.value, status=ProxyStatus.TESTING.value,
+                    type=proxy_type, status=ProxyStatus.TESTING.value,
                 )
                 self.session.add(proxy)
                 imported += 1
