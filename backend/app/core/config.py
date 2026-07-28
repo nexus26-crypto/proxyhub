@@ -48,8 +48,8 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     # Scheduler
-    PROXY_HEALTHCHECK_INTERVAL_SECONDS: int = 300
-    PROXY_TEST_URL: str = "https://httpbin.org/ip"
+    PROXY_HEALTHCHECK_INTERVAL_SECONDS: int = 60
+    PROXY_TEST_URL: str = "https://api.ipify.org"
     PROXY_TEST_TIMEOUT_SECONDS: int = 10
 
     # Gateway de Proxy Rotativo
