@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Cpu, MemoryStick, Database, Globe } from 'lucide-react'
+import { Cpu, MemoryStick, Database, Globe, Radio, ArrowDownToLine, ArrowUpFromLine } from 'lucide-react'
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
 import { dashboardService } from '../services/domain'
 import { MetricCard } from '../components/Common'
@@ -65,6 +65,22 @@ export default function DashboardPage() {
             <MetricCard title="Bloqueados/Inativos" value={data.proxies.blocked + data.proxies.inactive} tone="bad" />
           </div>
         </div>
+      </div>
+
+      <div>
+        <h2 className="text-sm text-slate-400 mb-2 uppercase tracking-wide flex items-center gap-1">
+          <Radio size={14} /> Gateway de Proxy Rotativo
+        </h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard title="Requisições totais" value={data.gateway.requests_total} />
+          <MetricCard title="Upload (enviado aos proxies)" value={`${data.gateway.bytes_in_mb.toFixed(1)} MB`} icon={ArrowUpFromLine} />
+          <MetricCard title="Download (recebido dos proxies)" value={`${data.gateway.bytes_out_mb.toFixed(1)} MB`} icon={ArrowDownToLine} />
+          <MetricCard title="Banda total consumida" value={`${data.gateway.bytes_total_mb.toFixed(1)} MB`} tone="warn" />
+        </div>
+        <p className="text-xs text-slate-500 mt-2">
+          Toda essa banda passa fisicamente pela sua VPS (entrada + saída) — é o principal fator a
+          observar se você tiver volume alto de requisições através do gateway.
+        </p>
       </div>
     </div>
   )

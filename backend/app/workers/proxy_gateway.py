@@ -24,7 +24,9 @@ import random
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
-from app.models.enums import ProxyStatus
+from app.core.redis_client import redis_client
+from app.models.enums import LogLevel, ProxyStatus
+from app.models.log import Log
 from app.models.proxy import Proxy, ProxyCheckHistory
 from app.repositories.proxy_repository import ProxyRepository
 from app.services.proxy_service import compute_score
@@ -38,6 +40,7 @@ GATEWAY_USERNAME = os.getenv("GATEWAY_USERNAME", "")
 GATEWAY_PASSWORD = os.getenv("GATEWAY_PASSWORD", "")
 CONNECT_TIMEOUT_SECONDS = 15
 MAX_GATEWAY_RETRIES = int(os.getenv("GATEWAY_MAX_RETRIES", "3"))
+LOG_SUCCESS = os.getenv("GATEWAY_LOG_SUCCESS", "true").lower() in ("1", "true", "yes")
 
 
 async def pick_rotating_proxy(exclude_ids: set | None = None):
@@ -58,12 +61,17 @@ async def pick_rotating_proxy(exclude_ids: set | None = None):
         return random.choices(proxies, weights=weights, k=1)[0]
 
 
-async def record_proxy_outcome(proxy_id, success: bool, reason: str | None = None) -> None:
+async def record_proxy_outcome(proxy_id, success: bool, reason: str | None = None, target: str | None = None) -> None:
     """
     Feedback loop em tempo real: toda vez que o gateway usa um proxy (sucesso
     ou falha), atualiza score/status/contadores imediatamente no banco --
     em vez de esperar o proximo ciclo do scheduler (ate 5 min). Assim proxies
     instaveis perdem peso na rotacao rapidamente.
+
+    Tambem grava um registro na tabela de Logs (visivel na aba Logs da interface):
+    falhas sempre sao logadas; sucessos sao logados conforme GATEWAY_LOG_SUCCESS
+    (default: true). Desative via .env se o volume de requisicoes for muito alto
+    e voce so quiser ver falhas/retries na interface.
     """
     try:
         async with AsyncSessionLocal() as session:
@@ -89,6 +97,21 @@ async def record_proxy_outcome(proxy_id, success: bool, reason: str | None = Non
                 proxy_id=proxy.id, success=success, latency_ms=proxy.latency_ms,
                 message=(reason or "OK")[:255],
             ))
+
+            if not success or LOG_SUCCESS:
+                target_info = f" -> {target}" if target else ""
+                message = (
+                    f"Gateway: proxy {proxy.host}:{proxy.port} OK{target_info}"
+                    if success
+                    else f"Gateway: proxy {proxy.host}:{proxy.port} FALHOU{target_info} -- {reason}"
+                )
+                session.add(Log(
+                    level=(LogLevel.INFO if success else LogLevel.WARNING).value,
+                    message=message[:1000],
+                    source="gateway",
+                    proxy_id=proxy.id,
+                ))
+
             await session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Falha ao registrar feedback do proxy %s: %s", proxy_id, exc)
@@ -128,7 +151,9 @@ async def read_headers(reader: asyncio.StreamReader) -> tuple[str, dict[str, str
     return request_line, headers, raw
 
 
-async def relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+    """Encaminha bytes de reader para writer ate a conexao fechar. Retorna total de bytes."""
+    total = 0
     try:
         while True:
             data = await reader.read(65536)
@@ -136,6 +161,7 @@ async def relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
                 break
             writer.write(data)
             await writer.drain()
+            total += len(data)
     except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
         pass
     finally:
@@ -143,6 +169,19 @@ async def relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
             writer.close()
         except Exception:  # noqa: BLE001
             pass
+    return total
+
+
+async def record_bandwidth(bytes_in: int, bytes_out: int) -> None:
+    """Acumula bytes trafegados pelo gateway no Redis (compartilhado com o Dashboard)."""
+    try:
+        pipe = redis_client.pipeline()
+        pipe.incrby("gateway:bytes_in", bytes_in)
+        pipe.incrby("gateway:bytes_out", bytes_out)
+        pipe.incr("gateway:requests_total")
+        await pipe.execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falha ao registrar banda no Redis: %s", exc)
 
 
 async def socks5_connect_upstream(target_host: str, target_port: int, proxy):
@@ -279,7 +318,7 @@ async def handle_connect(client_reader, client_writer, target_host: str, target_
         success, upstream_reader, upstream_writer, reason = await try_connect_upstream(
             target_host, target_port, proxy
         )
-        await record_proxy_outcome(proxy.id, success, reason)
+        await record_proxy_outcome(proxy.id, success, reason, target=f"{target_host}:{target_port}")
 
         if success:
             client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -288,11 +327,14 @@ async def handle_connect(client_reader, client_writer, target_host: str, target_
                 "Tunel HTTPS %s:%s via proxy %s:%s (tentativa %d/%d)",
                 target_host, target_port, proxy.host, proxy.port, attempt, MAX_GATEWAY_RETRIES,
             )
-            await asyncio.gather(
+            results = await asyncio.gather(
                 relay(client_reader, upstream_writer),
                 relay(upstream_reader, client_writer),
                 return_exceptions=True,
             )
+            bytes_in = results[0] if isinstance(results[0], int) else 0
+            bytes_out = results[1] if isinstance(results[1], int) else 0
+            await record_bandwidth(bytes_in, bytes_out)
             return
 
         last_reason = reason
@@ -367,7 +409,7 @@ async def handle_plain_http(client_reader, client_writer, request_line, headers,
             success, upstream_reader, upstream_writer, reason = await socks5_connect_upstream(
                 target_host, target_port, proxy
             )
-            await record_proxy_outcome(proxy.id, success, reason)
+            await record_proxy_outcome(proxy.id, success, reason, target=f"{target_host}:{target_port}")
             if not success:
                 logger.warning(
                     "Tentativa %d/%d: %s -- tentando outro", attempt, MAX_GATEWAY_RETRIES, reason,
@@ -397,7 +439,7 @@ async def handle_plain_http(client_reader, client_writer, request_line, headers,
                 await record_proxy_outcome(proxy.id, False, str(exc))
                 continue
 
-            await record_proxy_outcome(proxy.id, True)
+            await record_proxy_outcome(proxy.id, True, target=f"{target_host}:{target_port}")
             head = raw_head
             if proxy.username:
                 cred = base64.b64encode(f"{proxy.username}:{proxy.password}".encode()).decode()
@@ -411,11 +453,14 @@ async def handle_plain_http(client_reader, client_writer, request_line, headers,
                 request_line, proxy.host, proxy.port, attempt, MAX_GATEWAY_RETRIES,
             )
 
-        await asyncio.gather(
+        results = await asyncio.gather(
             relay(client_reader, upstream_writer),
             relay(upstream_reader, client_writer),
             return_exceptions=True,
         )
+        bytes_in = results[0] if isinstance(results[0], int) else 0
+        bytes_out = results[1] if isinstance(results[1], int) else 0
+        await record_bandwidth(bytes_in, bytes_out)
         return
 
     logger.error("Todas as %d tentativas de conexao ao proxy falharam para requisicao HTTP", MAX_GATEWAY_RETRIES)

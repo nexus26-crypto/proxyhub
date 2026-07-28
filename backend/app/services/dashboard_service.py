@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis_client import redis_client
 from app.repositories.proxy_repository import ProxyRepository
-from app.schemas.dashboard import DashboardOut, ProxyMetrics, SystemMetrics
+from app.schemas.dashboard import DashboardOut, GatewayMetrics, ProxyMetrics, SystemMetrics
 
 
 class DashboardService:
@@ -46,4 +46,23 @@ class DashboardService:
             testing=proxy_counts.get("testing", 0),
         )
 
-        return DashboardOut(system=system, proxies=proxies)
+        return DashboardOut(system=system, proxies=proxies, gateway=await self._gateway_metrics())
+
+    async def _gateway_metrics(self) -> GatewayMetrics:
+        try:
+            requests_total, bytes_in, bytes_out = await redis_client.mget(
+                "gateway:requests_total", "gateway:bytes_in", "gateway:bytes_out"
+            )
+        except Exception:  # noqa: BLE001
+            requests_total, bytes_in, bytes_out = None, None, None
+
+        requests_total = int(requests_total or 0)
+        bytes_in = int(bytes_in or 0)
+        bytes_out = int(bytes_out or 0)
+
+        return GatewayMetrics(
+            requests_total=requests_total,
+            bytes_in_mb=round(bytes_in / (1024 * 1024), 2),
+            bytes_out_mb=round(bytes_out / (1024 * 1024), 2),
+            bytes_total_mb=round((bytes_in + bytes_out) / (1024 * 1024), 2),
+        )

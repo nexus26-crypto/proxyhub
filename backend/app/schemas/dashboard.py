@@ -18,6 +18,14 @@ class ProxyMetrics(BaseModel):
     testing: int
 
 
+class GatewayMetrics(BaseModel):
+    requests_total: int
+    bytes_in_mb: float
+    bytes_out_mb: float
+    bytes_total_mb: float
+
+
 class DashboardOut(BaseModel):
     system: SystemMetrics
     proxies: ProxyMetrics
+    gateway: GatewayMetrics
