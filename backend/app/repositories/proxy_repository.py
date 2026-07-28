@@ -1,12 +1,22 @@
 from sqlalchemy import select, func
 
-from app.models.proxy import Proxy
+from app.models.proxy import Proxy, ProxyCheckHistory
 from app.models.enums import ProxyStatus
 from app.repositories.base import BaseRepository
 
 
 class ProxyRepository(BaseRepository[Proxy]):
     model = Proxy
+
+    async def get_recent_outcomes(self, proxy_id, limit: int = 5) -> list[bool]:
+        """Retorna os resultados (sucesso/falha) das ultimas `limit` checagens do proxy, mais recente primeiro."""
+        result = await self.session.execute(
+            select(ProxyCheckHistory.success)
+            .where(ProxyCheckHistory.proxy_id == proxy_id)
+            .order_by(ProxyCheckHistory.checked_at.desc())
+            .limit(limit)
+        )
+        return [row[0] for row in result.all()]
 
     async def get_by_host_port(self, host: str, port: int) -> Proxy | None:
         result = await self.session.execute(
