@@ -1,0 +1,95 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: proxyhub_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-proxyhub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-proxyhub}
+      POSTGRES_DB: ${POSTGRES_DB:-proxyhub}
+    ports:
+      - "5432:5432"
+    volumes:
+      - proxyhub_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-proxyhub}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - proxyhub_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: proxyhub_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - proxyhub_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: proxyhub_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - proxyhub_scraped_data:/app/scraped_data
+    networks:
+      - proxyhub_net
+
+  proxy_gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: proxyhub_proxy_gateway
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.proxy_gateway"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - proxyhub_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api/v1}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8000/api/v1/ws}
+    container_name: proxyhub_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+    networks:
+      - proxyhub_net
+
+networks:
+  proxyhub_net:
+    driver: bridge
+
+volumes:
+  proxyhub_postgres_data:
+  proxyhub_scraped_data:
